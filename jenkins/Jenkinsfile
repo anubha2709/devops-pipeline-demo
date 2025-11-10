@@ -1,0 +1,102 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_IMAGE = "anubha2709/node-lightweight-app:${env.BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'main', url: 'https://github.com/anubha2709/devops-pipeline-demo.git'
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    sh "docker build -t ${env.DOCKER_IMAGE} ./application/"
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                script {
+                    sh """
+                        # Clean up any existing test containers
+                        docker stop test-app 2>/dev/null || true
+                        docker rm test-app 2>/dev/null || true
+
+                        # Run new container
+                        docker run -d --name test-app -p 3000:3000 ${env.DOCKER_IMAGE}
+                        sleep 20  
+
+                        # Verify container is running but not exited
+                        if ! docker ps | grep -q test-app; then
+                            echo "Container failed to start!"
+                            docker logs test-app
+                            exit 1
+                        fi
+
+                        # Test health endpoint
+                        curl -f http://localhost:3000/health || exit 1
+
+                        # Cleanup
+                        docker stop test-app
+                        docker rm test-app
+                    """
+                }
+            }
+        }
+
+        stage('Push to DockerHub') {
+            steps {
+                script {
+                    withCredentials([
+                        string(credentialsId: 'vault-token', variable: 'VAULT_TOKEN'),
+                        usernamePassword(
+                            credentialsId: 'dockerhub-creds', 
+                            usernameVariable: 'DOCKER_USER_JENKINS',
+                            passwordVariable: 'DOCKER_PASS_JENKINS'
+                        )
+                    ]) {
+                        sh """
+                            # Set Vault address
+                            export VAULT_ADDR='http://127.0.0.1:8200'
+                            export VAULT_TOKEN='$VAULT_TOKEN'
+
+                            # Use Jenkins-managed credentials
+                            echo "$DOCKER_PASS_JENKINS" | docker login -u "$DOCKER_USER_JENKINS" --password-stdin
+
+                            # Push image
+                            docker push ${env.DOCKER_IMAGE}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                script {
+                    sh """
+                        kubectl create namespace devops-demo 2>/dev/null || true
+                        helm upgrade --install devops-app ./kubernetes/ \
+                          --namespace devops-demo \
+                          --set image.repository=anubha2709/node-lightweight-app \
+                          --set image.tag=${env.BUILD_NUMBER} \
+                          --set replicaCount=2
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}
+
