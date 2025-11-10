@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-lightweight-app
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: node-lightweight-app
+  template:
+    metadata:
+      labels:
+        app: node-lightweight-app
+    spec:
+      containers:
+        - name: node-lightweight-app
+          image: "anubha2709/node-lightweight-app:latest"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          envFrom:
+            - configMapRef:
+                name: node-lightweight-app-config

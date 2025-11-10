@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Dependencies
+node_modules/
+npm-debug.log*
+
+# Environment variables
+.env
+.vault-token
+
+# Kubernetes
+kubeconfig
+
+# Ansible
+*.retry
+
+# IDE
+.vscode/
+.idea/

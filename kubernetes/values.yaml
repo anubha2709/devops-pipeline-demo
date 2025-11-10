@@ -1,0 +1,27 @@
+replicaCount: 2
+
+image:
+  repository: anubha2709/node-lightweight-app
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 3000
+
+ingress:
+  enabled: true
+  host: lightweight-app.local
+  className: ""
+  annotations: {}
+  tla: []
+
+config:
+  NODE_ENV: production
+
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 50
+  

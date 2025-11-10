@@ -1,0 +1,306 @@
+-
+  name: Prepare Ubuntu headless server for Automated CI/CD deployment
+  hosts: localhost
+  become: yes
+  connection: local
+
+  tasks:
+    # ================================================================
+    # Step 0: Update environment
+    # ================================================================
+    - name: Update the Ubuntu environment and upgrade all installed packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+
+    # ================================================================
+    # Step 1: Cleanup any old repo entries or keyrings
+    # ================================================================
+    - name: Remove old Docker and Kubernetes repositories and keys
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/docker_repo.list
+        - /etc/apt/sources.list.d/kubernetes_repo.list
+        - /etc/apt/keyrings/docker.gpg
+        - /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    # ================================================================
+    # Step 2: Install all required base packages
+    # ================================================================
+    - name: Install prerequisite packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - software-properties-common
+        state: present
+        update_cache: yes
+
+    # ================================================================
+    # Step 3: Install Docker components
+    # ================================================================
+    - name: Ensure keyrings directory exists
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Add Docker GPG key (modern method)
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+
+    - name: Add Docker repository (modern)
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+        filename: docker_repo
+
+    - name: Install Docker engine and CLI
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+        update_cache: yes
+
+    - name: Enable and start Docker service
+      systemd:
+        name: docker
+        enabled: yes
+        state: started
+
+    # ================================================================
+    # Step 4: Install Kubernetes components
+    # ================================================================
+    - name: Add Kubernetes GPG key
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add Kubernetes repository
+      apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /"
+        state: present
+        filename: kubernetes_repo
+
+    - name: Update package cache after adding Kubernetes repo
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Kubernetes components
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        update_cache: yes
+
+    # ================================================================
+    # Step 5: Disabling swap for Kubernetes
+    # ================================================================
+    - name: Check if swap is currently active
+      command: swapon --show
+      register: swap_status
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Disable swap if active
+      command: swapoff -a
+      when: swap_status.stdout != ""
+
+    - name: Comment out swap entry in /etc/fstab
+      replace:
+        path: /etc/fstab
+        regexp: '^([^#].*swap.*)'
+        replace: '# \1'
+
+    # ================================================================   
+    # Step 6: Creating non-root user with SSH key and sudo privileges
+    # ================================================================
+    - name: Ensure new user exists
+      user:
+        name: devopsuser
+        comment: "DevOps Non-root User"
+        shell: /bin/bash
+        groups: sudo,docker
+        append: yes
+        create_home: yes
+
+    - name: Create SSH directory for the user
+      file:
+        path: /home/devopsuser/.ssh
+        state: directory
+        mode: '0700'
+        owner: devopsuser
+        group: devopsuser
+
+    - name: Add authorized public key for SSH access
+      copy:
+        dest: /home/devopsuser/.ssh/authorized_keys
+        content: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}"
+        owner: devopsuser
+        group: devopsuser
+        mode: '0600'
+      when: lookup('file', '~/.ssh/id_rsa.pub') != ""
+
+    - name: Allow passwordless sudo for devopsuser
+      copy:
+        dest: /etc/sudoers.d/devopsuser
+        content: 'devopsuser ALL=(ALL) NOPASSWD:ALL'
+        mode: '0440'
+        validate: 'visudo -cf %s'
+
+    # =================================================================
+    # Step 7: Configuring UFW
+    # =================================================================
+    - name: Ensure firewall is installed
+      apt:
+        name: ufw
+        state: present
+
+    - name: Reset UFW to defaults
+      community.general.ufw:
+        state: reset
+
+    - name: Allow SSH connections
+      community.general.ufw:
+        rule: allow
+        name: OpenSSH
+
+    - name: Allow Kubernetes API server port
+      community.general.ufw:
+        rule: allow
+        port: 6443
+        proto: tcp
+
+    - name: Allow kubelet API port
+      community.general.ufw: 
+        rule: allow
+        port: 10250
+        proto: tcp
+
+    - name: Allow etcd server client API
+      community.general.ufw:
+        rule: allow
+        port: 2379:2380
+        proto: tcp
+
+    - name: Allow NodePort range for Kubernetes services
+      community.general.ufw:
+        rule: allow
+        port: 30000:32767
+        proto: tcp
+
+    - name: Enable UFW with default deny policy
+      community.general.ufw:
+        state: enabled
+        default: deny
+
+    # =================================================================
+    # Step 8: Deploy Nginx container
+    # ================================================================= 
+    - name: Pull NGINX image
+      community.docker.docker_image:
+        name: nginx:alpine
+        source: pull
+      tags: nginx
+
+    - name: Run test NGINX container
+      community.docker.docker_container:
+        name: test-nginx
+        image: nginx:alpine
+        state: started
+        ports:
+          - "8080:80"
+        restart_policy: unless-stopped
+      tags: nginx
+
+    - name: Verify NGINX container is running
+      uri:
+        url: http://localhost:8080
+        status_code: 200
+      register: nginx_check
+      tags: nginx
+
+    - name: Display NGINX status
+      debug:
+        msg: "NGINX test container deployed successfully"
+      tags: nginx
+
+    # ==============================================================
+    # Initializing single node Kubernetes cluster
+    # ==============================================================
+    - name: Initialize Kubernetes control plane
+      command: kubeadm init --pod-network-cidr=10.244.0.0/16
+      args:
+        creates: /etc/kubernetes/admin.conf
+
+    - name: Create kube config directory for root
+      file:
+        path: /root/.kube
+        state: directory
+        mode: '0700'
+
+    - name: Copy admin.conf to root kube config
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /root/.kube/config
+        remote_src: yes
+
+    # ================================================================
+    # Step 10: Setup kubectl for devopsuser
+    # ================================================================
+    - name: Create .kube directory for devopsuser
+      file:
+        path: /home/devopsuser/.kube
+        state: directory
+        owner: devopsuser
+        group: devopsuser
+        mode: '0755'
+
+    - name: Copy Kubernetes admin.conf to devopsuser config
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/devopsuser/.kube/config
+        remote_src: yes
+        owner: devopsuser
+        group: devopsuser
+        mode: '0600'      
+
+    # ===============================================================
+    # Step 11: Deploy CNI for networking
+    # ===============================================================
+    - name: Install Flannel CNI
+      command: kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Allow scheduling pods on single control plane node
+      command: kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    # ==============================================================
+    # Step 12 : Install Helm
+    # ==============================================================
+    - name: Install Helm latest
+      shell: |
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      args:
+        creates: /usr/local/bin/helm
+    
+
+
