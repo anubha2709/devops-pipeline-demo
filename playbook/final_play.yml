@@ -301,6 +301,81 @@
         curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
       args:
         creates: /usr/local/bin/helm
+
+    
+    # ==============================================================
+    # Step 13: Install Jenkins as system service
+    # ==============================================================
+    - name: Add Jenkins repository key
+      apt_key:
+        url: https://pkg.jenkins.io/debian/jenkins.io-2023.key
+        state: present
+
+    - name: Add Jenkins repository
+      apt_repository:
+        repo: "deb https://pkg.jenkins.io/debian binary/"
+        state: present
+        filename: jenkins
+
+    - name: Update package cache after adding Jenkins repo
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Jenkins
+      apt:
+        name:
+          - jenkins
+          - fontconfig
+          - openjdk-17-jre
+        state: present
+
+    - name: Ensure Jenkins user is added to docker group
+      user:
+        name: jenkins
+        groups: docker
+        append: yes
+
+    - name: Modify Jenkins configuration to run on port 8081 (to avoid conflict with NGINX test container)
+      lineinfile:
+        path: /etc/default/jenkins
+        regexp: '^HTTP_PORT='
+        line: 'HTTP_PORT=8081'
+        backrefs: yes
+
+    - name: Enable and start Jenkins service
+      systemd:
+        name: jenkins
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Wait for Jenkins to start fully
+      wait_for:
+        port: 8081
+        delay: 10
+        timeout: 60
+      register: jenkins_ready
+
+    - name: Get initial Jenkins admin password
+      shell: cat /var/lib/jenkins/secrets/initialAdminPassword
+      register: jenkins_initial_password
+      changed_when: false
+
+    - name: Display Jenkins access information
+      debug:
+        msg: |
+          Jenkins installed successfully!
+          Access URL: http://{{ ansible_default_ipv4.address }}:8081
+          Initial Admin Password: {{ jenkins_initial_password.stdout }}
+          
+          Important: Complete setup via web UI and install suggested plugins.
+
+    - name: Allow Jenkins web interface port
+      community.general.ufw:
+        rule: allow
+        port: 8081
+        proto: tcp        
     
 
 
